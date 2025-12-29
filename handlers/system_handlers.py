@@ -1,0 +1,50 @@
+# system_handlers.py
+# -*- coding: utf-8 -*-
+"""
+Системні обробники:
+- /cancel: універсальне скасування діалогів
+- unknown command: ввічливий фолбек на невідомі команди
+- safety: безпечні відповіді на помилки вводу, щоб юзер не зависав
+
+Це НЕ нові фічі — це UX-запобіжники.
+"""
+
+import logging
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
+
+logger = logging.getLogger(__name__)
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Універсально скасовує поточний крок та повертає в меню."""
+    # Чистимо тимчасові ключі, не чіпаючи persistence в цілому
+    for k in ("awaiting_admin_input", "awaiting_ai_prompt", "state", "tmp", "pending"):
+        context.user_data.pop(k, None)
+
+    text = "Скасовано. Повертаю в меню. 🐾"
+    if update.effective_message:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    # Повертаємо в головне меню, якщо воно є
+    try:
+        from bot.handlers.start_help_handlers import send_main_menu  # локальний імпорт (уникаємо циклів)
+        await send_main_menu(update, context, is_callback=False)
+    except Exception:
+        # Якщо меню недоступне з будь-яких причин — не валимо бота
+        logger.debug("Не вдалося показати меню після /cancel", exc_info=True)
+
+    # Для ConversationHandler це буде трактуватись як END, якщо хендлер використають як fallback
+    return -1
+
+
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раніше відповідав на невідомі команди. Тепер — тиша (за вимогою UX)."""
+    return
+
+
+def register_system_handlers(application) -> None:
+    """Реєстрація системних обробників."""
+    application.add_handler(CommandHandler("cancel", cancel_command), group=0)
+    # Фолбек на невідомі команди — ВИМКНЕНО. Невідома команда = тиша.
