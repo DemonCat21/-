@@ -73,6 +73,40 @@ async def _arm_tops_auto_close(context: ContextTypes.DEFAULT_TYPE, message) -> N
     if settings.get('auto_delete_actions', 0) == 1:
         start_auto_close(context, TOPS_AUTO_CLOSE_KEY, timeout=420)  # 7 minutes
 
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job_data = getattr(context.job, "data", {}) if context.job else {}
+    chat_id = job_data.get("chat_id")
+    message_id = job_data.get("message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        bot = getattr(context, "bot", None) or context.application.bot
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def _schedule_tops_auto_delete(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    message_id: int,
+    timeout: int = 420,
+) -> None:
+    if not context or not context.application:
+        return
+    from bot.core.database import get_chat_settings
+    settings = await get_chat_settings(chat_id)
+    if settings.get('auto_delete_actions', 0) != 1:
+        return
+    context.job_queue.run_once(
+        delete_message_job,
+        timeout,
+        data={"chat_id": chat_id, "message_id": message_id},
+        name=f"delete_tops_{chat_id}_{message_id}",
+    )
+
+
 
 async def _send_or_edit(query, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup: InlineKeyboardMarkup):
     try:
@@ -169,6 +203,7 @@ async def top_entry_global(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat = update.effective_chat
     if not chat:
         return
+    msg = update.effective_message
     sent = await context.bot.send_message(
         chat.id,
         "🏆 <b>ВИБЕРИ ГРУ ДЛЯ ТОПУ</b> 🏆\n\n"
@@ -177,9 +212,23 @@ async def top_entry_global(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         parse_mode=ParseMode.HTML,
     )
     await _arm_tops_auto_close(context, sent)
+    await _schedule_tops_auto_delete(
+        context,
+        chat_id=sent.chat_id,
+        message_id=sent.message_id,
+    )
+    if msg:
+        await _schedule_tops_auto_delete(
+            context,
+            chat_id=msg.chat_id,
+            message_id=msg.message_id,
+        )
+
+
 
 
 async def top_entry_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = None
     chat = update.effective_chat
     if not chat:
         return
@@ -196,7 +245,17 @@ async def top_entry_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parse_mode=ParseMode.HTML,
     )
     await _arm_tops_auto_close(context, sent)
-
+    await _schedule_tops_auto_delete(
+        context,
+        chat_id=sent.chat_id,
+        message_id=sent.message_id,
+    )
+    if msg:
+        await _schedule_tops_auto_delete(
+            context,
+            chat_id=msg.chat_id,
+            message_id=msg.message_id,
+        )
 
 async def tops_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
