@@ -81,7 +81,8 @@ async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not chat_id or not message_id:
         return
     try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        bot = getattr(context, "bot", None) or context.application.bot
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
 
