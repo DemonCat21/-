@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Optional, Dict
 
 # --- Telegram Imports ---
-from telegram.constants import ParseMode, ChatMemberStatus
+from telegram.constants import ParseMode, ChatMemberStatus, ChatAction
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 )
@@ -45,7 +45,8 @@ from bot.core.database import (
     save_message, get_recent_messages, save_sticker, get_all_stickers,
     save_memory, get_memories_for_scope, remove_memory,
     is_ai_enabled_for_chat,
-    get_user_info
+    get_user_info,
+    clear_conversations,
 )
 from bot.handlers.reminder_handlers import is_reminder_trigger
 from bot.utils.utils import (
@@ -182,9 +183,10 @@ async def aimode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.chat_data['user_ai_modes'] = {}
         
     context.chat_data['user_ai_modes'][user_id] = mode
+    await clear_conversations(user_id=user_id, chat_id=update.effective_chat.id)
     ctx = await get_user_addressing(user_id)
     await update.message.reply_text(
-        f"Мур. Мій режим для {ctx.you} в <b>цьому чаті</b> змінено на: <b>{mode}</b>.",
+        f"Мур. Мій режим для {ctx.you} в <b>цьому чаті</b> змінено на: <b>{mode}</b>. Починаю з чистого контексту.",
         parse_mode=ParseMode.HTML
     )
 
@@ -302,6 +304,10 @@ class AIChatQueueManager:
                     pass
 
             await queue.put(task_data)
+            try:
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            except Exception:
+                pass
             
             if chat_id not in self.workers or self.workers[chat_id].done():
                 self.workers[chat_id] = asyncio.create_task(self._worker(chat_id, bot))
@@ -1075,6 +1081,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(k in text_lower for k in keys):
             await message.reply_text(random.choice(resps))
             return
+
+    try:
+        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except Exception:
+        pass
 
     # Rate Limit Check
     # Якщо це пряма відповідь (reply) на повідомлення бота — ігноруємо rate limit

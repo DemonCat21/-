@@ -18,6 +18,7 @@ import httpx
 import pytz
 import dateparser
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from bot.core.database import get_user_profile
@@ -32,7 +33,7 @@ from bot.utils.utils import (
 logger = logging.getLogger(__name__)
 
 # Використовуємо лише env; дефолтних ключів немає, щоб уникнути 401 і витоку ключа.
-OWM_API_KEY = (os.getenv("OWM_API_KEY") or "d3c550734a49fda0ca0ec4cb9a71631b").strip()
+OWM_API_KEY = (os.getenv("OWM_API_KEY") or "").strip()
 OWM_GEOCODE_URL = "https://api.openweathermap.org/geo/1.0/direct"
 OWM_ONECALL_URL = "https://api.openweathermap.org/data/2.5/onecall"
 OWM_FORECAST_URL = "https://api.openweathermap.org/data/2.5/forecast"  # 5-day / 3-hour fallback
@@ -47,10 +48,12 @@ _weather_cache: Dict[str, Tuple[datetime, Any]] = {}
 # Автозакриття
 WEATHER_AUTO_CLOSE_KEY = "weather_screen"
 CB_WEATHER_CLOSE = "weather:close"
-CB_WEATHER_TODAY = "weather:today"
+CB_WEATHER_NOW_PREFIX = "weather:now:"
+CB_WEATHER_TODAY_PREFIX = "weather:today:"
 
 # Зберігаємо контекст погоди для кнопок (по message_id)
 WEATHER_STATE_KEY = "weather_state"
+
 
 async def _arm_weather_auto_close(context: ContextTypes.DEFAULT_TYPE, message) -> None:
     if not message:
@@ -66,8 +69,9 @@ async def _arm_weather_auto_close(context: ContextTypes.DEFAULT_TYPE, message) -
     # Check if auto_delete_actions is enabled
     from bot.core.database import get_chat_settings
     settings = await get_chat_settings(message.chat_id)
-    if settings.get('auto_delete_actions', 0) == 1:
+    if settings.get("auto_delete_actions", 0) == 1:
         start_auto_close(context, WEATHER_AUTO_CLOSE_KEY, timeout=420)  # 7 minutes
+
 
 # ==== Допоміжні функції кешу ====
 
@@ -137,7 +141,7 @@ async def _fetch_onecall(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         "lon": lon,
         "appid": OWM_API_KEY,
         "units": "metric",
-        "exclude": "minutely,alerts",
+        "exclude": "minutely",
         "lang": "uk",
     }
     try:
@@ -194,7 +198,6 @@ async def _fetch_forecast_fallback(lat: float, lon: float) -> Optional[Dict[str,
     # Агрегуємо по датах
     by_date: Dict[datetime.date, list] = {}
     for item in data.get("list", []):
-        dt_txt = item.get("dt_txt")
         ts = item.get("dt")
         if not ts:
             continue
@@ -483,6 +486,123 @@ def _fmt_temp(v: float) -> str:
     return f"{sign}{v}°C"
 
 
+def _wind_strength_label(wind_speed: Optional[float]) -> Optional[str]:
+    if wind_speed is None:
+        return None
+    if wind_speed <= 3:
+        return "слабкий"
+    if wind_speed <= 8:
+        return "помірний"
+    return "сильний"
+
+
+def _humidity_label(humidity: Optional[float]) -> Optional[str]:
+    if humidity is None:
+        return None
+    return "висока" if humidity >= 80 else "нормальна"
+
+
+def _make_city_id(lat: float, lon: float) -> str:
+    return f"{lat:.4f},{lon:.4f}"
+
+
+def _snow_or_rain_desc(desc: str) -> bool:
+    return any(token in desc for token in ("сніг", "дощ", "мряка", "дощик", "злива"))
+
+
+def _collect_precip_amount(item: Dict[str, Any]) -> float:
+    rain = item.get("rain") or {}
+    snow = item.get("snow") or {}
+    total = 0.0
+    if isinstance(rain, dict):
+        total += float(rain.get("1h") or 0) + float(rain.get("3h") or 0)
+    elif isinstance(rain, (int, float)):
+        total += float(rain)
+    if isinstance(snow, dict):
+        total += float(snow.get("1h") or 0) + float(snow.get("3h") or 0)
+    elif isinstance(snow, (int, float)):
+        total += float(snow)
+    return total
+
+
+def _build_alert_summary(alerts: List[Dict[str, Any]]) -> Optional[str]:
+    if not alerts:
+        return None
+    first = alerts[0]
+    event = (first.get("event") or "Попередження").strip()
+    return f"Є офіційне попередження: {event.lower()}. Будьте уважні."
+
+
+def _build_warnings(
+    *,
+    temp: Optional[float],
+    humidity: Optional[float],
+    wind_speed: Optional[float],
+    visibility: Optional[float],
+    desc: str,
+    precip_amount: float,
+    alerts: List[Dict[str, Any]],
+) -> List[str]:
+    if alerts:
+        alert_text = _build_alert_summary(alerts)
+        return [alert_text] if alert_text else []
+
+    warnings: List[str] = []
+    desc_lower = desc.lower() if desc else ""
+    if temp is not None:
+        if -3 <= temp <= 1 and (precip_amount > 0 or _snow_or_rain_desc(desc_lower)):
+            warnings.append("Можлива ожеледиця на дорогах.")
+        elif -3 <= temp <= 1 and (humidity or 0) >= 85:
+            warnings.append("Холод і висока вологість — слизько під ногами.")
+    if visibility is not None and visibility <= 1000:
+        warnings.append("Низька видимість через туман.")
+    elif (humidity or 0) >= 90 and (wind_speed or 0) <= 2:
+        warnings.append("Ймовірний туман через високу вологість і слабкий вітер.")
+    if wind_speed is not None and wind_speed >= 10:
+        warnings.append("Сильний вітер — обережно на вулиці.")
+    if precip_amount >= 6:
+        warnings.append("Інтенсивні опади можуть ускладнити видимість.")
+    return warnings
+
+
+def _build_advice(
+    *,
+    temp: Optional[float],
+    wind_speed: Optional[float],
+    precip_amount: float,
+    desc: str,
+) -> str:
+    desc_lower = desc.lower() if desc else ""
+    if precip_amount >= 2 or _snow_or_rain_desc(desc_lower):
+        return "🧥 Порада: парасоля або капюшон стануть у пригоді."
+    if temp is not None and temp <= -3:
+        return "🧥 Порада: тепла куртка не завадить."
+    if wind_speed is not None and wind_speed >= 10:
+        return "🧥 Порада: уважніше з поривами вітру."
+    return "🧥 Порада: одягайся по погоді."
+
+
+def _build_overview_sentence(
+    *,
+    feels_like: Optional[float],
+    desc: str,
+    wind_speed: Optional[float],
+    humidity: Optional[float],
+) -> str:
+    parts: List[str] = []
+    if feels_like is not None:
+        parts.append(f"Відчувається як {_fmt_temp(feels_like)}.")
+    if desc:
+        parts.append(f"{desc.capitalize()}.")
+    wind_label = _wind_strength_label(wind_speed)
+    if wind_label:
+        parts.append(f"Вітер {wind_label}.")
+    humidity_label = _humidity_label(humidity)
+    if humidity_label == "висока":
+        parts.append("Вологість висока.")
+    return " ".join(parts).strip()
+
+
 def _format_day(date_val: datetime.date, daily: Dict[str, Any], detailed: bool) -> str:
     weather = (daily.get("weather") or [{}])[0]
     main = weather.get("main", "")
@@ -549,64 +669,156 @@ def _heading(city: str, label: str, emoji: str) -> str:
     # маленький "вайб" без зайвого — працює в HTML-режимі reply_html
     return f"<b>{emoji} {city}</b> <i>· {label}</i> 🐾"
 
-def _build_current_section(city: str, current: Dict[str, Any], daily: List[Dict[str, Any]], today_date: datetime.date, source_hint: str) -> List[str]:
-    """Формує блок "погода зараз" — завжди показуємо при виклику команди."""
-    now_dt = datetime.now(KYIV_TZ)
-    time_label = now_dt.strftime("%H:%M")
 
-    # 1) Спроба взяти справді поточні дані з OneCall
-    if current and current.get("temp") is not None:
-        weather = (current.get("weather") or [{}])[0]
-        main = weather.get("main", "")
-        desc = (weather.get("description") or main or "погода").strip()
-        desc = desc[:1].upper() + desc[1:] if desc else "Погода"
-        emoji = _emoji_for(main)
-        temp = _fmt_temp(current.get("temp"))
-        feels = current.get("feels_like")
-        feels_hint = f" (відч. {_fmt_temp(feels)})" if feels is not None else ""
+def _build_current_section(
+    city: str,
+    current: Dict[str, Any],
+    daily: List[Dict[str, Any]],
+    alerts: List[Dict[str, Any]],
+    today_date: datetime.date,
+    source_hint: str,
+) -> List[str]:
+    """Формує блок "погода зараз" у форматі сторінки."""
+    header = f"😺 Зараз · {city}"
 
-        wind = current.get("wind_speed")
-        wind_deg = current.get("wind_deg")
-        wind_dir = _wind_dir_uk(wind_deg) if wind_deg is not None else "—"
-        humidity_val = current.get("humidity")
-        humidity = f"{int(humidity_val)}%" if humidity_val is not None else None
+    use_current = current and current.get("temp") is not None
+    data_item = current if use_current else None
+    if not use_current:
+        for item in daily or []:
+            ts = item.get("dt")
+            if not ts:
+                continue
+            d = datetime.fromtimestamp(ts, tz=KYIV_TZ).date()
+            if d == today_date:
+                data_item = item
+                break
 
-        line1 = f"😺 <b>{city} · зараз · {time_label}</b>"
-        line2 = f"🌡️ {temp}{feels_hint} · {desc}"
-        details: List[str] = []
-        if wind is not None:
-            details.append(f"🌬️ {wind_dir}, ~{round(wind)} м/с")
-        if humidity:
-            details.append(f"💧 {humidity}")
-        if details:
-            line3 = " · ".join(details)
-            return [line1, line2, line3]
-        return [line1, line2]
-
-    # 2) Фолбек: якщо "current" немає — беремо наближено з daily (це часто буває у спрощеному прогнозі)
-    approx_item = None
-    for item in daily or []:
-        ts = item.get("dt")
-        if not ts:
-            continue
-        d = datetime.fromtimestamp(ts, tz=KYIV_TZ).date()
-        if d == today_date:
-            approx_item = item
-            break
-    if approx_item:
-        approx_emoji = _emoji_for((approx_item.get("weather") or [{}])[0].get("main", ""))
-        lines: List[str] = [f"{approx_emoji} <b>{city} · зараз · {time_label}</b>", "<i>(наближено за денним прогнозом)</i>"]
-        lines.append(_format_day(today_date, approx_item, detailed=True))
+    if not data_item:
+        out = [header, "Немає даних для поточної погоди."]
         if source_hint:
-            lines.append(source_hint)
-        return lines
+            out.append(source_hint)
+        return out
 
-    # 3) Вкрай рідкісний кейс — нічого немає
-    out = [f"😿 <b>{city} · зараз · {time_label}</b>", "Немає даних для поточної погоди."]
+    weather = (data_item.get("weather") or [{}])[0]
+    desc = (weather.get("description") or weather.get("main") or "погода").strip()
+    temp_val = data_item.get("temp") if use_current else (data_item.get("temp", {}) or {}).get("day")
+    feels_val = data_item.get("feels_like") if use_current else (data_item.get("feels_like", {}) or {}).get("day")
+    wind_speed = data_item.get("wind_speed") if use_current else data_item.get("wind_speed")
+    humidity_val = data_item.get("humidity")
+    visibility = data_item.get("visibility") if use_current else None
+    precip_amount = _collect_precip_amount(data_item)
+
+    base_lines = [header]
+    if temp_val is not None and feels_val is not None:
+        base_lines.append(f"🌡 {_fmt_temp(temp_val)} (відчувається як {_fmt_temp(feels_val)})")
+    elif temp_val is not None:
+        base_lines.append(f"🌡 {_fmt_temp(temp_val)}")
+    else:
+        base_lines.append("🌡 Дані про температуру недоступні")
+    if desc:
+        base_lines.append(f"☁️ {desc.lower()}")
+    if wind_speed is not None:
+        base_lines.append(f"🌬 {round(wind_speed)} м/с")
+
+    lines = [*base_lines]
+
+    warnings = _build_warnings(
+        temp=temp_val,
+        humidity=humidity_val,
+        wind_speed=wind_speed,
+        visibility=visibility,
+        desc=desc,
+        precip_amount=precip_amount,
+        alerts=alerts,
+    )
+    if warnings:
+        lines.extend([f"⚠️ {warnings[0]}"])
+
     if source_hint:
-        out.append(source_hint)
-    return out
+        lines.append(source_hint)
+    return [line for line in lines if line]
 
+
+def _min_feels_like(feels_like: Dict[str, Any]) -> Optional[float]:
+    if not feels_like:
+        return None
+    values = [v for v in feels_like.values() if isinstance(v, (int, float))]
+    return min(values) if values else None
+
+
+def _build_today_section(
+    city: str,
+    daily_item: Dict[str, Any],
+    alerts: List[Dict[str, Any]],
+    label: str,
+) -> List[str]:
+    weather = (daily_item.get("weather") or [{}])[0]
+    desc = (weather.get("description") or weather.get("main") or "погода").strip()
+    emoji = _emoji_for(weather.get("main", ""))
+    temps = daily_item.get("temp", {}) or {}
+    day_temp = temps.get("max") if temps.get("max") is not None else temps.get("day")
+    night_temp = temps.get("min") if temps.get("min") is not None else temps.get("night")
+    feels_min = _min_feels_like(daily_item.get("feels_like") or {})
+
+    main_line_parts = [f"{emoji} {desc.capitalize()}."]
+    if day_temp is not None and night_temp is not None:
+        main_line_parts.append(f"{_fmt_temp(day_temp)} вдень, {_fmt_temp(night_temp)} вночі")
+    if feels_min is not None:
+        main_line_parts.append(f"відчувається {_fmt_temp(feels_min)}.")
+    elif main_line_parts and not main_line_parts[-1].endswith("."):
+        main_line_parts[-1] = f"{main_line_parts[-1]}."
+    main_line = " ".join(main_line_parts)
+
+    lines: List[str] = [f"{emoji} {city} · {label} 🐾", main_line]
+
+    pop = daily_item.get("pop")
+    rain_amount = daily_item.get("rain") or 0
+    snow_amount = daily_item.get("snow") or 0
+    if pop is not None or rain_amount or snow_amount:
+        if rain_amount or snow_amount:
+            if snow_amount and snow_amount >= rain_amount:
+                lines.append(f"☔️ Сніг до {round(snow_amount)} мм")
+            else:
+                lines.append(f"☔️ Дощ до {round(rain_amount)} мм")
+        elif pop is not None and pop < 0.2:
+            lines.append("☔️ Без опадів")
+        elif pop is not None:
+            lines.append("☔️ Опади ймовірні")
+
+    wind_speed = daily_item.get("wind_speed")
+    wind_gust = daily_item.get("wind_gust")
+    if wind_speed is not None:
+        gust_text = ""
+        if wind_gust:
+            gust_text = f" (пориви до {round(wind_gust)} м/с)"
+        lines.append(f"🌬️ ~{round(wind_speed)} м/с{gust_text}")
+
+    humidity_val = daily_item.get("humidity")
+    if humidity_val is not None:
+        lines.append(f"💧 Вологість {int(humidity_val)}%")
+
+    precip_amount = _collect_precip_amount(daily_item)
+    overview_parts: List[str] = []
+    if desc:
+        overview_parts.append(f"Протягом дня {desc.lower()}.")
+    if feels_min is not None and night_temp is not None and feels_min < night_temp:
+        overview_parts.append("Надвечір відчутно прохолодніше.")
+
+    warning_hint = _build_warnings(
+        temp=day_temp,
+        humidity=humidity_val,
+        wind_speed=wind_speed,
+        visibility=None,
+        desc=desc,
+        precip_amount=precip_amount,
+        alerts=alerts,
+    )
+    if warning_hint:
+        overview_parts.append(warning_hint[0])
+
+    if overview_parts:
+        lines.append(f"🧾 {' '.join(overview_parts[:2])}")
+    return [line for line in lines if line]
 
 
 # ==== Основна логіка ====
@@ -656,11 +868,12 @@ async def _build_response(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
 
     daily: List[Dict[str, Any]] = data.get("daily") or []
     current: Dict[str, Any] = data.get("current") or {}
+    alerts: List[Dict[str, Any]] = data.get("alerts") or []
     if not daily:
         return "😿 Погода недоступна."
 
     today_date = datetime.now(KYIV_TZ).date()
-    source_hint = "\n<i>Джерело: 5-денний прогноз, точність нижча.</i>" if used_fallback else ""
+    source_hint = ""
 
     def pick_daily_for_date(d: datetime.date) -> Optional[Dict[str, Any]]:
         for item in daily:
@@ -679,9 +892,6 @@ async def _build_response(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
         if source_hint:
             lines.append(source_hint)
 
-
-    # Поточна погода — завжди показуємо вгорі (на момент виклику)
-    current_section = _build_current_section(normalized_city, current, daily, today_date, source_hint)
     # Обробка режимів
     if mode in {"today", "tomorrow", "date"}:
         target = target_date or today_date
@@ -693,11 +903,14 @@ async def _build_response(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
         item = pick_daily_for_date(target)
         if not item:
             return "😿 Немає даних на цю дату."
-        heading_label = "сьогодні" if delta == 0 else "завтра" if delta == 1 else f"{_weekday_uk(target)}, {_format_date_uk(target)}"
-        day_emoji = _emoji_for((item.get("weather") or [{}])[0].get("main", ""))
-        lines: List[str] = [*current_section, "", _heading(normalized_city, heading_label, day_emoji), _format_day(target, item, detailed=True)]
-        append_tips(lines, item)
+        label = "сьогодні" if delta == 0 else "завтра" if delta == 1 else f"{_weekday_uk(target)}, {_format_date_uk(target)}"
+        lines = _build_today_section(normalized_city, item, alerts, label)
+        if source_hint:
+            lines.append(source_hint)
         return "\n".join(l for l in lines if l)
+
+    # Поточна погода — сторінка "Зараз"
+    current_section = _build_current_section(normalized_city, current, daily, alerts, today_date, source_hint)
 
     if mode == "weekend":
         weekend_items: List[Tuple[datetime.date, Dict[str, Any]]] = []
@@ -723,7 +936,6 @@ async def _build_response(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
     if mode == "now":
         return "\n".join(l for l in current_section if l)
 
-
     if mode == "week" or mode == "month":
         max_days = min(len(daily), 7)
         if max_days == 0:
@@ -748,25 +960,31 @@ async def _build_response(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
     return "😿 Не розпізнав період. Спробуйте: сьогодні, завтра, тиждень, місяць або дату."  # fallback
 
 
-def _weather_keyboard(*, show_today: bool) -> InlineKeyboardMarkup:
+def _weather_keyboard(*, city_id: str, show_nav: bool = True) -> InlineKeyboardMarkup:
     """Клавіатура екрана погоди.
 
-    UX-вимога: «🐾 Сьогодні» має бути нижньою кнопкою.
+    UX-вимога: кнопки «🐾 Зараз» і «🐾 Сьогодні».
     """
-    rows: List[List[InlineKeyboardButton]] = [[InlineKeyboardButton("😽 Закрити", callback_data=CB_WEATHER_CLOSE)]]
-    if show_today:
-        rows.append([InlineKeyboardButton("🐾 Сьогодні", callback_data=CB_WEATHER_TODAY)])
+    rows: List[List[InlineKeyboardButton]] = []
+    if show_nav:
+        rows.append(
+            [
+                InlineKeyboardButton("🐾 Зараз", callback_data=f"{CB_WEATHER_NOW_PREFIX}{city_id}"),
+                InlineKeyboardButton("🐾 Сьогодні", callback_data=f"{CB_WEATHER_TODAY_PREFIX}{city_id}"),
+            ]
+        )
+    rows.append([InlineKeyboardButton("😽 Закрити", callback_data=CB_WEATHER_CLOSE)])
     return InlineKeyboardMarkup(rows)
 
 
 def _close_keyboard() -> InlineKeyboardMarkup:
     """Сумісність зі старими викликами (тільки «Закрити»)."""
-    return _weather_keyboard(show_today=False)
+    return InlineKeyboardMarkup([[InlineKeyboardButton("😽 Закрити", callback_data=CB_WEATHER_CLOSE)]])
 
 
 def _remember_weather_state(
     context: ContextTypes.DEFAULT_TYPE,
-    message_id: int,
+    city_id: str,
     city_name: str,
     geo: Tuple[float, float, str],
 ) -> None:
@@ -778,7 +996,7 @@ def _remember_weather_state(
     if isinstance(state, dict) and len(state) > 50:
         for k in list(state.keys())[:10]:
             state.pop(k, None)
-    state[str(message_id)] = {
+    state[str(city_id)] = {
         "city_name": city_name,
         "lat": float(geo[0]),
         "lon": float(geo[1]),
@@ -787,12 +1005,12 @@ def _remember_weather_state(
 
 
 def _get_weather_state(
-    context: ContextTypes.DEFAULT_TYPE, message_id: int
+    context: ContextTypes.DEFAULT_TYPE, city_id: str
 ) -> Optional[Tuple[str, Tuple[float, float, str]]]:
     if not context or not getattr(context, "chat_data", None):
         return None
     state = context.chat_data.get(WEATHER_STATE_KEY) or {}
-    payload = state.get(str(message_id)) if isinstance(state, dict) else None
+    payload = state.get(str(city_id)) if isinstance(state, dict) else None
     if not isinstance(payload, dict):
         return None
     try:
@@ -827,7 +1045,7 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     text = update.effective_message.text or ""
     ctx_user = await get_user_addressing(user.id) if user else AddressingContext(None)
 
-    # Визначаємо період
+    # Визначаємо період лише для валідації дат
     mode, target_date = _parse_period(text)
     if mode == "past":
         await update.effective_message.reply_html("😿 Минулу дату показати не можу.", reply_markup=_close_keyboard())
@@ -843,11 +1061,14 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     response = await _build_response(update, context, mode, target_date, city_name, geo)
-    show_today_btn = mode == "now"
-    sent = await update.effective_message.reply_html(response, reply_markup=_weather_keyboard(show_today=show_today_btn))
+    city_id = _make_city_id(geo[0], geo[1])
+    show_nav = mode == "now"
+    sent = await update.effective_message.reply_html(
+        response,
+        reply_markup=_weather_keyboard(city_id=city_id, show_nav=show_nav),
+    )
     if sent:
-        if show_today_btn:
-            _remember_weather_state(context, sent.message_id, city_name, geo)
+        _remember_weather_state(context, city_id, city_name, geo)
         await _arm_weather_auto_close(context, sent)
 
 
@@ -867,9 +1088,10 @@ async def weather_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ctx_user = await get_user_addressing(update.effective_user.id) if update.effective_user else AddressingContext(None)
     # За UX — одразу показуємо «зараз», а «сьогодні» даємо кнопкою
     response = await _build_response(update, context, "now", datetime.now(KYIV_TZ).date(), city_name, geo)
-    sent = await update.effective_message.reply_html(response, reply_markup=_weather_keyboard(show_today=True))
+    city_id = _make_city_id(lat, lon)
+    sent = await update.effective_message.reply_html(response, reply_markup=_weather_keyboard(city_id=city_id))
     if sent:
-        _remember_weather_state(context, sent.message_id, city_name, geo)
+        _remember_weather_state(context, city_id, city_name, geo)
         await _arm_weather_auto_close(context, sent)
 
 
@@ -888,6 +1110,40 @@ async def weather_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logger.debug("Не вдалося закрити екран погоди", exc_info=True)
 
 
+def _city_id_from_callback(data: str, prefix: str) -> Optional[str]:
+    if not data or not data.startswith(prefix):
+        return None
+    return data[len(prefix):]
+
+
+async def weather_now_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    if not query.message:
+        return
+    city_id = _city_id_from_callback(query.data or "", CB_WEATHER_NOW_PREFIX)
+    if not city_id:
+        return
+    restored = _get_weather_state(context, city_id)
+    if not restored:
+        try:
+            await query.edit_message_text("😿 Не можу згадати це місто. Напиши ще раз: погода <місто>.")
+        except Exception:
+            logger.debug("Не вдалося відредагувати повідомлення погоди", exc_info=True)
+        return
+    city_name, geo = restored
+    text = await _build_response(update, context, "now", datetime.now(KYIV_TZ).date(), city_name, geo)
+    cancel_auto_close(context, WEATHER_AUTO_CLOSE_KEY)
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_weather_keyboard(city_id=city_id))
+    except Exception:
+        logger.debug("Не вдалося відредагувати повідомлення погоди", exc_info=True)
+        return
+    await _arm_weather_auto_close(context, query.message)
+
+
 async def weather_today_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
@@ -896,7 +1152,10 @@ async def weather_today_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not query.message:
         return
 
-    restored = _get_weather_state(context, query.message.message_id)
+    city_id = _city_id_from_callback(query.data or "", CB_WEATHER_TODAY_PREFIX)
+    if not city_id:
+        return
+    restored = _get_weather_state(context, city_id)
     if not restored:
         # Якщо контекст втрачено — мʼякий фолбек
         try:
@@ -911,12 +1170,9 @@ async def weather_today_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     cancel_auto_close(context, WEATHER_AUTO_CLOSE_KEY)
     try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_close_keyboard())
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_weather_keyboard(city_id=city_id))
     except Exception:
-        # якщо edit не вдався — просто надсилаємо новим повідомленням
-        sent = await query.message.reply_html(text, reply_markup=_close_keyboard())
-        if sent:
-            await _arm_weather_auto_close(context, sent)
+        logger.debug("Не вдалося відредагувати повідомлення погоди", exc_info=True)
         return
 
     # Переозброюємо автозакриття для відредагованого повідомлення
@@ -941,6 +1197,7 @@ def register_weather_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(weather_close_cb, pattern=f"^{CB_WEATHER_CLOSE}$"), group=1)
 
     # Кнопка «Сьогодні»
-    application.add_handler(CallbackQueryHandler(weather_today_cb, pattern=f"^{CB_WEATHER_TODAY}$"), group=1)
+    application.add_handler(CallbackQueryHandler(weather_now_cb, pattern=f"^{CB_WEATHER_NOW_PREFIX}.+$"), group=1)
+    application.add_handler(CallbackQueryHandler(weather_today_cb, pattern=f"^{CB_WEATHER_TODAY_PREFIX}.+$"), group=1)
 
     logger.info("Обробники погоди зареєстровані.")
