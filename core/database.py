@@ -35,6 +35,12 @@ ALLOWED_MODULE_COLUMNS = [
     "auto_delete_actions",
 ]
 
+CHAT_SETTINGS_BOOL_COLUMNS = {
+    "reminders_enabled",
+    "auto_delete_actions",
+    "ai_auto_clear_conversations",
+}
+
 
 async def column_exists(db: aiosqlite.Connection, table_name: str, column_name: str) -> bool:
     """Перевіряє, чи існує стовпець у вказаній таблиці."""
@@ -164,6 +170,7 @@ async def init_db() -> None:
                     rules TEXT, 
                     max_warns INTEGER DEFAULT 3,
                     auto_delete_actions INTEGER DEFAULT 0,
+                    ai_auto_clear_conversations INTEGER DEFAULT 0,
 
                     -- Сезонні режими
                     new_year_mode TEXT DEFAULT 'auto',
@@ -193,6 +200,7 @@ async def init_db() -> None:
                 ("rules", "TEXT"),
                 ("max_warns", "INTEGER DEFAULT 3"),
                 ("auto_delete_actions", "INTEGER DEFAULT 0"),
+                ("ai_auto_clear_conversations", "INTEGER DEFAULT 0"),
                 ("mems_turn_time", "INTEGER DEFAULT 60"),
                 ("mems_vote_time", "INTEGER DEFAULT 45"),
                 ("mems_max_players", "INTEGER DEFAULT 10"),
@@ -658,6 +666,27 @@ async def set_max_warns(chat_id: int, limit: int):
             (limit, chat_id),
         )
         await db.commit()
+
+
+async def set_chat_setting_flag(chat_id: int, column: str, enabled: bool) -> None:
+    if column not in CHAT_SETTINGS_BOOL_COLUMNS:
+        logger.error(f"Спроба оновити недійсний стовпець налаштувань: {column}")
+        return
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO chat_settings (chat_id) VALUES (?)", (chat_id,)
+            )
+            await db.execute(
+                f"UPDATE chat_settings SET {column} = ? WHERE chat_id = ?",
+                (int(enabled), chat_id),
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error(
+            f"Помилка при оновленні налаштування {column} для чату {chat_id}: {e}",
+            exc_info=True,
+        )
 
 
 # =============================================================================

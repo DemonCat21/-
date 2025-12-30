@@ -46,6 +46,7 @@ from bot.core.database import (
     save_memory, get_memories_for_scope, remove_memory,
     is_ai_enabled_for_chat,
     get_user_info,
+    get_chat_settings,
     clear_conversations,
 )
 from bot.handlers.reminder_handlers import is_reminder_trigger
@@ -620,6 +621,10 @@ async def process_ai_response(
 
             # Використовуємо безпечну відправку
             await safe_send_message(bot, chat_id, response_text, message_to_reply_id)
+
+        settings = await get_chat_settings(chat_id)
+        if settings.get("ai_auto_clear_conversations", 0) == 1:
+            await _schedule_ai_auto_clear(application, chat_id, user_id)
         
     except Exception as e:
         logger.error(f"Помилка в process_ai_response: {e}")
@@ -631,6 +636,30 @@ async def process_ai_response(
             )
         except:
             pass
+
+
+async def _ai_auto_clear_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data or {}
+    chat_id = data.get("chat_id")
+    user_id = data.get("user_id")
+    if chat_id is None or user_id is None:
+        return
+    await clear_conversations(user_id=user_id, chat_id=chat_id)
+
+
+async def _schedule_ai_auto_clear(application: Application, chat_id: int, user_id: int) -> None:
+    job_queue = application.job_queue if application else None
+    if not job_queue:
+        return
+    job_name = f"ai_auto_clear:{chat_id}:{user_id}"
+    for job in job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+    job_queue.run_once(
+        _ai_auto_clear_job,
+        when=600,
+        name=job_name,
+        data={"chat_id": chat_id, "user_id": user_id},
+    )
 
 
 # =============================================================================
