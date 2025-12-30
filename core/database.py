@@ -183,7 +183,8 @@ async def init_db() -> None:
                     mems_min_players INTEGER DEFAULT 2,
                     mems_win_score INTEGER DEFAULT 10,
                     mems_hand_size INTEGER DEFAULT 6,
-                    mems_max_rounds INTEGER DEFAULT 10
+                    mems_max_rounds INTEGER DEFAULT 10,
+                    mems_registration_time INTEGER DEFAULT 120
                 )
                 """
             )
@@ -208,6 +209,7 @@ async def init_db() -> None:
                 ("mems_win_score", "INTEGER DEFAULT 10"),
                 ("mems_hand_size", "INTEGER DEFAULT 6"),
                 ("mems_max_rounds", "INTEGER DEFAULT 10"),
+                ("mems_registration_time", "INTEGER DEFAULT 120"),
             ]
             
             for col_name, col_type in columns_to_add:
@@ -595,6 +597,7 @@ async def get_chat_settings(chat_id: int) -> Dict[str, Any]:
         "mems_max_players": 10,
         "mems_win_score": 10,
         "mems_hand_size": 6,
+        "mems_registration_time": 120,
     }
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -706,6 +709,7 @@ MEMS_ALLOWED_SETTINGS = {
     "win_score": ("mems_win_score", 10),
     "hand_size": ("mems_hand_size", 6),
     "max_rounds": ("mems_max_rounds", 10),
+    "registration_time": ("mems_registration_time", 120),
 }
 
 

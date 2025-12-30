@@ -422,39 +422,18 @@ async def _build_settings_menu(chat_id: int) -> InlineKeyboardMarkup:
     """Будує Меню Налаштувань Чату."""
     settings = await get_chat_settings(chat_id)
     
-    welcome_status = "Встановлено 🥰" if settings.get('welcome_message') else "Немає 🌿"
-    rules_status = "Встановлено 📜" if settings.get('rules') else "Немає 🌿"
-    
     auto_delete_actions_enabled = (settings.get('auto_delete_actions', 0) == 1)
     auto_delete_status = 'ON ✅' if auto_delete_actions_enabled else 'OFF ❌'
     
-    reminders_enabled = (settings.get('reminders_enabled', 1) == 1)
-    reminders_status = 'ON ✅' if reminders_enabled else 'OFF ❌'
     ai_auto_clear_enabled = (settings.get('ai_auto_clear_conversations', 0) == 1)
     ai_auto_clear_status = 'ON ✅' if ai_auto_clear_enabled else 'OFF ❌'
-    ny_mode = settings.get('new_year_mode', 'auto')
-    ny_active_now = is_in_new_year_period()
-    ny_status = format_new_year_mode(str(ny_mode), ny_active_now)
 
     keyboard = [
-        [
-            InlineKeyboardButton(f"👋 Привітання · {welcome_status}", callback_data=f"admin_chat_set_welcome_{chat_id}"),
-            InlineKeyboardButton(f"📜 Правила · {rules_status}", callback_data=f"admin_chat_set_rules_{chat_id}"),
-        ],
-        [
-            InlineKeyboardButton(f"⚖️ Ліміт варнів · {settings.get('max_warns', 3)}", callback_data=f"admin_chat_set_warns_{chat_id}"),
-            InlineKeyboardButton(f"🎄 Режим · {ny_status}", callback_data=f"admin_chat_newyear_{chat_id}"),
-        ],
-        [
-            InlineKeyboardButton(f"⏰ Нагадування · {reminders_status}", callback_data=f"admin_chat_toggle_reminders_enabled_{chat_id}"),
-            InlineKeyboardButton(f"🗑 Дії · {auto_delete_status}", callback_data=f"admin_chat_toggle_auto_delete_actions_{chat_id}"),
-        ],
         [
             InlineKeyboardButton(f"🧹 AI автоочистка 10 хв · {ai_auto_clear_status}", callback_data=f"admin_chat_toggle_ai_auto_clear_conversations_{chat_id}"),
         ],
         [
-            InlineKeyboardButton("🎮 Мемчики та котики", callback_data=f"admin_chat_mems_{chat_id}"),
-            InlineKeyboardButton("🐈‍⬛ Модулі", callback_data=f"admin_chat_modules_{chat_id}"),
+            InlineKeyboardButton(f"🗑 Дії · {auto_delete_status}", callback_data=f"admin_chat_toggle_auto_delete_actions_{chat_id}"),
         ],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"admin_chat_main_{chat_id}")],
     ]
@@ -469,6 +448,7 @@ async def _build_mems_settings_menu(chat_id: int) -> InlineKeyboardMarkup:
     max_players = int(settings.get("mems_max_players", 10) or 10)
     win_score = int(settings.get("mems_win_score", 10) or 10)
     hand_size = int(settings.get("mems_hand_size", 6) or 6)
+    registration_time = int(settings.get("mems_registration_time", 120) or 120)
 
     # UX: натиснув параметр -> бачиш ВСІ варіанти (без циклічного перемикання)
     keyboard = [
@@ -477,6 +457,7 @@ async def _build_mems_settings_menu(chat_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"👥 Гравців: до {max_players}", callback_data=f"admin_chat_mems_choose_max_players_{chat_id}")],
         [InlineKeyboardButton(f"🏆 До: {win_score} очок", callback_data=f"admin_chat_mems_choose_win_score_{chat_id}")],
         [InlineKeyboardButton(f"🃏 В руці: {hand_size}", callback_data=f"admin_chat_mems_choose_hand_size_{chat_id}")],
+        [InlineKeyboardButton(f"📝 Реєстрація: {registration_time}с", callback_data=f"admin_chat_mems_choose_registration_time_{chat_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"admin_chat_settings_{chat_id}")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -492,6 +473,7 @@ async def _build_mems_choose_menu(chat_id: int, key: str) -> InlineKeyboardMarku
         "max_players": int(settings.get("mems_max_players", 10) or 10),
         "win_score": int(settings.get("mems_win_score", 10) or 10),
         "hand_size": int(settings.get("mems_hand_size", 6) or 6),
+        "registration_time": int(settings.get("mems_registration_time", 120) or 120),
     }
 
     presets = {
@@ -500,6 +482,7 @@ async def _build_mems_choose_menu(chat_id: int, key: str) -> InlineKeyboardMarku
         "max_players": [4, 6, 8, 10, 12, 16],
         "win_score": [5, 8, 10, 12, 15],
         "hand_size": [4, 5, 6, 7, 8],
+        "registration_time": [30, 60, 90, 120, 180, 240],
     }
 
     labels = {
@@ -508,6 +491,7 @@ async def _build_mems_choose_menu(chat_id: int, key: str) -> InlineKeyboardMarku
         "max_players": "👥 Макс. гравців",
         "win_score": "🏆 До скількох очок",
         "hand_size": "🃏 Карт у руці",
+        "registration_time": "📝 Час реєстрації (сек)",
     }
 
     cur = current_map.get(key)
@@ -525,7 +509,13 @@ async def _build_mems_choose_menu(chat_id: int, key: str) -> InlineKeyboardMarku
 async def _build_moderation_menu(chat_id: int) -> InlineKeyboardMarkup:
     """Будує Меню Модерації."""
     words = await get_filtered_words(chat_id)
+    settings = await get_chat_settings(chat_id)
+    welcome_status = "Встановлено 🥰" if settings.get('welcome_message') else "Немає 🌿"
+    rules_status = "Встановлено 📜" if settings.get('rules') else "Немає 🌿"
     keyboard = [
+        [InlineKeyboardButton(f"👋 Привітання · {welcome_status}", callback_data=f"admin_chat_set_welcome_{chat_id}")],
+        [InlineKeyboardButton(f"📜 Правила · {rules_status}", callback_data=f"admin_chat_set_rules_{chat_id}")],
+        [InlineKeyboardButton(f"⚖️ Ліміт варнів · {settings.get('max_warns', 3)}", callback_data=f"admin_chat_set_warns_{chat_id}")],
         [InlineKeyboardButton(f"🗒️ Список фільтрів ({len(words)})", callback_data=f"admin_chat_list_words_{chat_id}")],
         [InlineKeyboardButton("➕ Додати єресь", callback_data=f"admin_chat_add_word_{chat_id}")],
         [InlineKeyboardButton("➖ Пробачити (видалити)", callback_data=f"admin_chat_del_word_{chat_id}")],
