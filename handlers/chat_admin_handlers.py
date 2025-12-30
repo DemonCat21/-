@@ -580,8 +580,6 @@ async def admin_chat_callback_router(update: Update, context: ContextTypes.DEFAU
 
     elif action_type == "newyear":
         # Перемикаємо AUTO -> ON -> OFF -> AUTO
-        if not await _check_admin_rights(update, context, chat_id):
-            return
         settings = await get_chat_settings(chat_id)
         cur = str(settings.get("new_year_mode", "auto") or "auto").lower().strip()
         order = ["auto", "on", "off"]
