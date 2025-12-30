@@ -64,7 +64,8 @@ DEFAULT_SETTINGS = {
     "min_players": 2,
     "win_score": 10,
     "hand_size": 6,
-    "max_rounds": 10
+    "max_rounds": 10,
+    "registration_time": 120
 }
 
 SETTINGS_PRESETS = {
@@ -74,7 +75,8 @@ SETTINGS_PRESETS = {
     "min_players": [2, 3, 4, 5],
     "win_score": [5, 10, 15, 20, 25, 30, 50, 0],
     "hand_size": [4, 5, 6, 7, 8],
-    "max_rounds": [5, 10, 15, 20, 0]
+    "max_rounds": [5, 10, 15, 20, 0],
+    "registration_time": [30, 60, 90, 120, 180, 240]
 }
 
 MIN_PLAYERS = 2
@@ -376,7 +378,10 @@ async def load_games_on_startup(application):
             
             if not game.is_started and game.state == "LOBBY":
                 game.lobby_timer_job = application.job_queue.run_once(
-                    timer_lobby_end, LOBBY_TIME, chat_id=gid, name=f"lobby_{gid}"
+                    timer_lobby_end,
+                    game.settings.get("registration_time", LOBBY_TIME),
+                    chat_id=gid,
+                    name=f"lobby_{gid}",
                 )
                 try:
                     await safe_send(application.bot, gid, "🐈 <b>Бот перезапущено.</b> Таймер лобі скинуто.", parse_mode=ParseMode.HTML)
@@ -890,11 +895,11 @@ async def update_lobby_message(update: Update, context: ContextTypes.DEFAULT_TYP
     text = (
         f"🍷 <b>ЗБІР У КЕЛІЇ</b>\n\n"
         f"Учасники [{len(game.players)}/{game.settings['max_players']}]:\n{players_list}\n"
-        f"\n<i>Старт автоматично через {LOBBY_TIME}с або кнопкою.</i>"
+        f"\n<i>Старт через {game.settings.get('registration_time', LOBBY_TIME)}с</i>"
     )
     
     kb = [
-        [InlineKeyboardButton("➕ Зайти / Вийти", callback_data="join_leave")],
+        [InlineKeyboardButton("🐾Приєднатись", callback_data="join_leave")],
         [InlineKeyboardButton("🔔 Почати гру", callback_data="start_game_force")]
     ]
 
