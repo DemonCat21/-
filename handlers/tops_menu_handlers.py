@@ -225,6 +225,7 @@ async def top_entry_global(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def top_entry_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = None
     chat = update.effective_chat
     if not chat:
         return
