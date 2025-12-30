@@ -35,6 +35,12 @@ ALLOWED_MODULE_COLUMNS = [
     "auto_delete_actions",
 ]
 
+CHAT_SETTINGS_BOOL_COLUMNS = {
+    "reminders_enabled",
+    "auto_delete_actions",
+    "ai_auto_clear_conversations",
+}
+
 
 async def column_exists(db: aiosqlite.Connection, table_name: str, column_name: str) -> bool:
     """Перевіряє, чи існує стовпець у вказаній таблиці."""
@@ -164,6 +170,7 @@ async def init_db() -> None:
                     rules TEXT, 
                     max_warns INTEGER DEFAULT 3,
                     auto_delete_actions INTEGER DEFAULT 0,
+                    ai_auto_clear_conversations INTEGER DEFAULT 0,
 
                     -- Сезонні режими
                     new_year_mode TEXT DEFAULT 'auto',
@@ -176,7 +183,8 @@ async def init_db() -> None:
                     mems_min_players INTEGER DEFAULT 2,
                     mems_win_score INTEGER DEFAULT 10,
                     mems_hand_size INTEGER DEFAULT 6,
-                    mems_max_rounds INTEGER DEFAULT 10
+                    mems_max_rounds INTEGER DEFAULT 10,
+                    mems_registration_time INTEGER DEFAULT 120
                 )
                 """
             )
@@ -193,6 +201,7 @@ async def init_db() -> None:
                 ("rules", "TEXT"),
                 ("max_warns", "INTEGER DEFAULT 3"),
                 ("auto_delete_actions", "INTEGER DEFAULT 0"),
+                ("ai_auto_clear_conversations", "INTEGER DEFAULT 0"),
                 ("mems_turn_time", "INTEGER DEFAULT 60"),
                 ("mems_vote_time", "INTEGER DEFAULT 45"),
                 ("mems_max_players", "INTEGER DEFAULT 10"),
@@ -200,6 +209,7 @@ async def init_db() -> None:
                 ("mems_win_score", "INTEGER DEFAULT 10"),
                 ("mems_hand_size", "INTEGER DEFAULT 6"),
                 ("mems_max_rounds", "INTEGER DEFAULT 10"),
+                ("mems_registration_time", "INTEGER DEFAULT 120"),
             ]
             
             for col_name, col_type in columns_to_add:
@@ -587,6 +597,7 @@ async def get_chat_settings(chat_id: int) -> Dict[str, Any]:
         "mems_max_players": 10,
         "mems_win_score": 10,
         "mems_hand_size": 6,
+        "mems_registration_time": 120,
     }
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -660,6 +671,32 @@ async def set_max_warns(chat_id: int, limit: int):
         await db.commit()
 
 
+async def set_chat_setting_flag(chat_id: int, column: str, enabled: bool) -> None:
+    if column not in CHAT_SETTINGS_BOOL_COLUMNS:
+        logger.error(f"Спроба оновити недійсний стовпець налаштувань: {column}")
+        return
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if not await column_exists(db, "chat_settings", column):
+                logger.info(f"Міграція 'chat_settings': додаю '{column}'...")
+                await db.execute(
+                    f"ALTER TABLE chat_settings ADD COLUMN {column} INTEGER DEFAULT 0"
+                )
+            await db.execute(
+                "INSERT OR IGNORE INTO chat_settings (chat_id) VALUES (?)", (chat_id,)
+            )
+            await db.execute(
+                f"UPDATE chat_settings SET {column} = ? WHERE chat_id = ?",
+                (int(enabled), chat_id),
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error(
+            f"Помилка при оновленні налаштування {column} для чату {chat_id}: {e}",
+            exc_info=True,
+        )
+
+
 # =============================================================================
 # Мемчики та котики — налаштування/стан/кеш
 # =============================================================================
@@ -672,6 +709,7 @@ MEMS_ALLOWED_SETTINGS = {
     "win_score": ("mems_win_score", 10),
     "hand_size": ("mems_hand_size", 6),
     "max_rounds": ("mems_max_rounds", 10),
+    "registration_time": ("mems_registration_time", 120),
 }
 
 

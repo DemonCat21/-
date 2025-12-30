@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Optional, Dict
 
 # --- Telegram Imports ---
-from telegram.constants import ParseMode, ChatMemberStatus
+from telegram.constants import ParseMode, ChatMemberStatus, ChatAction
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 )
@@ -45,7 +45,9 @@ from bot.core.database import (
     save_message, get_recent_messages, save_sticker, get_all_stickers,
     save_memory, get_memories_for_scope, remove_memory,
     is_ai_enabled_for_chat,
-    get_user_info
+    get_user_info,
+    get_chat_settings,
+    clear_conversations,
 )
 from bot.handlers.reminder_handlers import is_reminder_trigger
 from bot.utils.utils import (
@@ -182,9 +184,10 @@ async def aimode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.chat_data['user_ai_modes'] = {}
         
     context.chat_data['user_ai_modes'][user_id] = mode
+    await clear_conversations(user_id=user_id, chat_id=update.effective_chat.id)
     ctx = await get_user_addressing(user_id)
     await update.message.reply_text(
-        f"Мур. Мій режим для {ctx.you} в <b>цьому чаті</b> змінено на: <b>{mode}</b>.",
+        f"Мур. Мій режим для {ctx.you} в <b>цьому чаті</b> змінено на: <b>{mode}</b>. Починаю з чистого контексту.",
         parse_mode=ParseMode.HTML
     )
 
@@ -302,6 +305,10 @@ class AIChatQueueManager:
                     pass
 
             await queue.put(task_data)
+            try:
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            except Exception:
+                pass
             
             if chat_id not in self.workers or self.workers[chat_id].done():
                 self.workers[chat_id] = asyncio.create_task(self._worker(chat_id, bot))
@@ -317,18 +324,23 @@ def _clean_deepseek_thinking(text: str) -> str:
     """Очищає теги <think>...</think>, якщо модель їх повернула."""
     return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
-async def safe_send_message(bot: Bot, chat_id: int, text: str, reply_to_message_id: int = None):
+async def safe_send_message(
+    bot: Bot, chat_id: int, text: str, reply_to_message_id: int = None
+) -> list[int]:
     """
     Розбиває довге повідомлення на частини (по 4096 символів) і відправляє їх.
     """
     MAX_LENGTH = 4096
+    sent_ids: list[int] = []
     
     if len(text) <= MAX_LENGTH:
-        await bot.send_message(
+        sent = await bot.send_message(
             chat_id=chat_id,
             text=text,
             reply_to_message_id=reply_to_message_id
         )
+        if sent:
+            sent_ids.append(sent.message_id)
     else:
         parts = [text[i:i+MAX_LENGTH] for i in range(0, len(text), MAX_LENGTH)]
         first_msg = await bot.send_message(
@@ -337,6 +349,7 @@ async def safe_send_message(bot: Bot, chat_id: int, text: str, reply_to_message_
             reply_to_message_id=reply_to_message_id
         )
         last_msg_id = first_msg.message_id
+        sent_ids.append(first_msg.message_id)
         for part in parts[1:]:
             await asyncio.sleep(0.3) 
             next_msg = await bot.send_message(
@@ -345,6 +358,8 @@ async def safe_send_message(bot: Bot, chat_id: int, text: str, reply_to_message_
                 reply_to_message_id=last_msg_id
             )
             last_msg_id = next_msg.message_id
+            sent_ids.append(next_msg.message_id)
+    return sent_ids
 
 
 # --- Main AI Response Logic ---
@@ -589,6 +604,8 @@ async def process_ai_response(
         await save_message(user_id, chat_id, "user", user_input)
         
         response_text = await get_ai_response(user_id, chat_id, user_input, bot, mode, reply_context)
+        ai_message_ids: list[int] = []
+        sticker_message_id: int | None = None
 
         # --- Sticker marker support (AI can request a sticker) ---
         response_text, sticker_keyword = _extract_sticker_marker(response_text)
@@ -599,11 +616,13 @@ async def process_ai_response(
                 stickers = application.bot_data.get('all_stickers_cache', [])
                 match = next((s for s in stickers if (s.get('keyword') or '').strip().lower() == sticker_keyword), None)
                 if match and match.get('file_unique_id'):
-                    await bot.send_sticker(
+                    sticker_msg = await bot.send_sticker(
                         chat_id=chat_id,
                         sticker=match['file_unique_id'],
                         reply_to_message_id=message_to_reply_id
                     )
+                    if sticker_msg:
+                        sticker_message_id = sticker_msg.message_id
             except Exception:
                 # Sticker is optional — never fail the whole response
                 pass
@@ -613,7 +632,31 @@ async def process_ai_response(
             await save_message(user_id, chat_id, "assistant", response_text)
 
             # Використовуємо безпечну відправку
-            await safe_send_message(bot, chat_id, response_text, message_to_reply_id)
+            ai_message_ids = await safe_send_message(
+                bot, chat_id, response_text, message_to_reply_id
+            )
+
+        settings = await get_chat_settings(chat_id)
+        if settings.get("ai_auto_clear_conversations", 0) == 1:
+            await _schedule_ai_auto_clear(application, chat_id, user_id)
+        if settings.get("auto_delete_actions", 0) == 1:
+            await _schedule_ai_auto_delete(
+                application,
+                chat_id=chat_id,
+                message_id=message_to_reply_id,
+            )
+            for msg_id in ai_message_ids:
+                await _schedule_ai_auto_delete(
+                    application,
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                )
+            if sticker_message_id:
+                await _schedule_ai_auto_delete(
+                    application,
+                    chat_id=chat_id,
+                    message_id=sticker_message_id,
+                )
         
     except Exception as e:
         logger.error(f"Помилка в process_ai_response: {e}")
@@ -625,6 +668,61 @@ async def process_ai_response(
             )
         except:
             pass
+
+
+async def _ai_auto_clear_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data or {}
+    chat_id = data.get("chat_id")
+    user_id = data.get("user_id")
+    if chat_id is None or user_id is None:
+        return
+    await clear_conversations(user_id=user_id, chat_id=chat_id)
+
+
+async def _schedule_ai_auto_clear(application: Application, chat_id: int, user_id: int) -> None:
+    job_queue = application.job_queue if application else None
+    if not job_queue:
+        return
+    job_name = f"ai_auto_clear:{chat_id}:{user_id}"
+    for job in job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+    job_queue.run_once(
+        _ai_auto_clear_job,
+        when=600,
+        name=job_name,
+        data={"chat_id": chat_id, "user_id": user_id},
+    )
+
+
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job_data = getattr(context.job, "data", {}) if context.job else {}
+    chat_id = job_data.get("chat_id")
+    message_id = job_data.get("message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        bot = getattr(context, "bot", None) or context.application.bot
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def _schedule_ai_auto_delete(
+    application: Application,
+    *,
+    chat_id: int,
+    message_id: int,
+    timeout: int = 420,
+) -> None:
+    job_queue = application.job_queue if application else None
+    if not job_queue:
+        return
+    job_queue.run_once(
+        delete_message_job,
+        timeout,
+        data={"chat_id": chat_id, "message_id": message_id},
+        name=f"delete_ai_{chat_id}_{message_id}",
+    )
 
 
 # =============================================================================
@@ -647,12 +745,12 @@ async def _is_ai_invocation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # 2. Отримуємо дані бота (надійно)
     if 'bot_id' not in context.application.bot_data or 'bot_username' not in context.application.bot_data:
-         try:
-             bot_info = await context.bot.get_me()
-             context.application.bot_data['bot_username'] = bot_info.username.lower()
-             context.application.bot_data['bot_id'] = bot_info.id
-         except Exception as e:
-             logger.error(f"Не вдалося отримати дані бота: {e}")
+        try:
+            bot_info = await context.bot.get_me()
+            context.application.bot_data['bot_username'] = bot_info.username.lower()
+            context.application.bot_data['bot_id'] = bot_info.id
+        except Exception as e:
+            logger.error(f"Не вдалося отримати дані бота: {e}")
 
     bot_id = context.application.bot_data.get('bot_id')
     bot_username = context.application.bot_data.get('bot_username')
@@ -675,8 +773,8 @@ async def _is_ai_invocation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             
         # Резервна перевірка по username (якщо ID чомусь не співпав)
         if reply.from_user and reply.from_user.username and bot_username:
-             if reply.from_user.username.lower() == bot_username:
-                 return True
+            if reply.from_user.username.lower() == bot_username:
+                return True
 
     return False
 
@@ -1075,6 +1173,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(k in text_lower for k in keys):
             await message.reply_text(random.choice(resps))
             return
+
+    try:
+        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except Exception:
+        pass
 
     # Rate Limit Check
     # Якщо це пряма відповідь (reply) на повідомлення бота — ігноруємо rate limit

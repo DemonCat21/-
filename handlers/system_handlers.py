@@ -44,7 +44,42 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return
 
 
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job_data = getattr(context.job, "data", {}) if context.job else {}
+    chat_id = job_data.get("chat_id")
+    message_id = job_data.get("message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        bot = getattr(context, "bot", None) or context.application.bot
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def auto_delete_command_invocation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+    from bot.core.database import get_chat_settings
+
+    settings = await get_chat_settings(chat.id)
+    if settings.get("auto_delete_actions", 0) != 1:
+        return
+    context.job_queue.run_once(
+        delete_message_job,
+        420,
+        data={"chat_id": chat.id, "message_id": message.message_id},
+        name=f"delete_command_{chat.id}_{message.message_id}",
+    )
+
+
 def register_system_handlers(application) -> None:
     """Реєстрація системних обробників."""
     application.add_handler(CommandHandler("cancel", cancel_command), group=0)
     # Фолбек на невідомі команди — ВИМКНЕНО. Невідома команда = тиша.
+    application.add_handler(
+        MessageHandler(filters.COMMAND, auto_delete_command_invocation),
+        group=99,
+    )

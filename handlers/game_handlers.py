@@ -44,7 +44,7 @@ async def _arm_mini_games_auto_close(context: ContextTypes.DEFAULT_TYPE, message
     from bot.core.database import get_chat_settings
     settings = await get_chat_settings(message.chat_id)
     if settings.get('auto_delete_actions', 0) == 1:
-        start_auto_close(context, MINI_GAMES_AUTO_CLOSE_KEY, timeout=60)  # 1 minute
+        start_auto_close(context, MINI_GAMES_AUTO_CLOSE_KEY, timeout=120)  # 2 minutes
 
 # --- Налаштування Ігор ---
 # ВИПРАВЛЕННЯ: Встановлюємо реальний кулдаун, а не 0
