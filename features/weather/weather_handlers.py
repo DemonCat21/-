@@ -33,7 +33,7 @@ from bot.utils.utils import (
 logger = logging.getLogger(__name__)
 
 # Використовуємо лише env; дефолтних ключів немає, щоб уникнути 401 і витоку ключа.
-OWM_API_KEY = (os.getenv("OWM_API_KEY") or "").strip()
+OWM_API_KEY = (os.getenv("OWM_API_KEY") or "d3c550734a49fda0ca0ec4cb9a71631b").strip()
 OWM_GEOCODE_URL = "https://api.openweathermap.org/geo/1.0/direct"
 OWM_ONECALL_URL = "https://api.openweathermap.org/data/2.5/onecall"
 OWM_FORECAST_URL = "https://api.openweathermap.org/data/2.5/forecast"  # 5-day / 3-hour fallback
@@ -71,6 +71,41 @@ async def _arm_weather_auto_close(context: ContextTypes.DEFAULT_TYPE, message) -
     settings = await get_chat_settings(message.chat_id)
     if settings.get("auto_delete_actions", 0) == 1:
         start_auto_close(context, WEATHER_AUTO_CLOSE_KEY, timeout=420)  # 7 minutes
+
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job_data = getattr(context.job, "data", {}) if context.job else {}
+    chat_id = job_data.get("chat_id")
+    message_id = job_data.get("message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        bot = getattr(context, "bot", None) or context.application.bot
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def _schedule_weather_auto_delete(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    message_id: int,
+    timeout: int = 420,
+) -> None:
+    if not context or not context.application:
+        return
+    from bot.core.database import get_chat_settings
+    settings = await get_chat_settings(chat_id)
+    if settings.get("auto_delete_actions", 0) != 1:
+        return
+    context.job_queue.run_once(
+        delete_message_job,
+        timeout,
+        data={"chat_id": chat_id, "message_id": message_id},
+        name=f"delete_weather_{chat_id}_{message_id}",
+    )
+
+
 
 
 # ==== Допоміжні функції кешу ====
@@ -798,6 +833,7 @@ def _build_today_section(
         lines.append(f"💧 Вологість {int(humidity_val)}%")
 
     precip_amount = _collect_precip_amount(daily_item)
+
     overview_parts: List[str] = []
     if desc:
         overview_parts.append(f"Протягом дня {desc.lower()}.")
@@ -819,6 +855,7 @@ def _build_today_section(
     if overview_parts:
         lines.append(f"🧾 {' '.join(overview_parts[:2])}")
     return [line for line in lines if line]
+
 
 
 # ==== Основна логіка ====
@@ -935,6 +972,7 @@ async def _build_response(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
 
     if mode == "now":
         return "\n".join(l for l in current_section if l)
+
 
     if mode == "week" or mode == "month":
         max_days = min(len(daily), 7)
@@ -1070,7 +1108,16 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if sent:
         _remember_weather_state(context, city_id, city_name, geo)
         await _arm_weather_auto_close(context, sent)
-
+        await _schedule_weather_auto_delete(
+            context,
+            chat_id=sent.chat_id,
+            message_id=sent.message_id,
+        )
+        await _schedule_weather_auto_delete(
+            context,
+            chat_id=update.effective_message.chat_id,
+            message_id=update.effective_message.message_id,
+        )
 
 async def weather_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message or not update.effective_message.location:
@@ -1089,10 +1136,23 @@ async def weather_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # За UX — одразу показуємо «зараз», а «сьогодні» даємо кнопкою
     response = await _build_response(update, context, "now", datetime.now(KYIV_TZ).date(), city_name, geo)
     city_id = _make_city_id(lat, lon)
-    sent = await update.effective_message.reply_html(response, reply_markup=_weather_keyboard(city_id=city_id))
+    sent = await update.effective_message.reply_html(
+        response,
+        reply_markup=_weather_keyboard(city_id=city_id, show_nav=True),
+    )
     if sent:
         _remember_weather_state(context, city_id, city_name, geo)
         await _arm_weather_auto_close(context, sent)
+        await _schedule_weather_auto_delete(
+            context,
+            chat_id=sent.chat_id,
+            message_id=sent.message_id,
+        )
+        await _schedule_weather_auto_delete(
+            context,
+            chat_id=update.effective_message.chat_id,
+            message_id=update.effective_message.message_id,
+        )
 
 
 async def weather_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1137,7 +1197,7 @@ async def weather_now_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = await _build_response(update, context, "now", datetime.now(KYIV_TZ).date(), city_name, geo)
     cancel_auto_close(context, WEATHER_AUTO_CLOSE_KEY)
     try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_weather_keyboard(city_id=city_id))
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_weather_keyboard(city_id=city_id, show_nav=True))
     except Exception:
         logger.debug("Не вдалося відредагувати повідомлення погоди", exc_info=True)
         return
@@ -1170,7 +1230,7 @@ async def weather_today_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     cancel_auto_close(context, WEATHER_AUTO_CLOSE_KEY)
     try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_weather_keyboard(city_id=city_id))
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_weather_keyboard(city_id=city_id, show_nav=True))
     except Exception:
         logger.debug("Не вдалося відредагувати повідомлення погоди", exc_info=True)
         return
