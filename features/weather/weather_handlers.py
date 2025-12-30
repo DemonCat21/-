@@ -73,6 +73,39 @@ async def _arm_weather_auto_close(context: ContextTypes.DEFAULT_TYPE, message) -
         start_auto_close(context, WEATHER_AUTO_CLOSE_KEY, timeout=420)  # 7 minutes
 
 
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job_data = getattr(context.job, "data", {}) if context.job else {}
+    chat_id = job_data.get("chat_id")
+    message_id = job_data.get("message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def _schedule_weather_auto_delete(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    message_id: int,
+    timeout: int = 420,
+) -> None:
+    if not context or not context.application:
+        return
+    from bot.core.database import get_chat_settings
+    settings = await get_chat_settings(chat_id)
+    if settings.get("auto_delete_actions", 0) != 1:
+        return
+    context.job_queue.run_once(
+        delete_message_job,
+        timeout,
+        data={"chat_id": chat_id, "message_id": message_id},
+        name=f"delete_weather_{chat_id}_{message_id}",
+    )
+
+
 # ==== Допоміжні функції кешу ====
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -1070,6 +1103,16 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if sent:
         _remember_weather_state(context, city_id, city_name, geo)
         await _arm_weather_auto_close(context, sent)
+        await _schedule_weather_auto_delete(
+            context,
+            chat_id=sent.chat_id,
+            message_id=sent.message_id,
+        )
+        await _schedule_weather_auto_delete(
+            context,
+            chat_id=update.effective_message.chat_id,
+            message_id=update.effective_message.message_id,
+        )
 
 
 async def weather_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1093,6 +1136,16 @@ async def weather_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if sent:
         _remember_weather_state(context, city_id, city_name, geo)
         await _arm_weather_auto_close(context, sent)
+        await _schedule_weather_auto_delete(
+            context,
+            chat_id=sent.chat_id,
+            message_id=sent.message_id,
+        )
+        await _schedule_weather_auto_delete(
+            context,
+            chat_id=update.effective_message.chat_id,
+            message_id=update.effective_message.message_id,
+        )
 
 
 async def weather_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -245,6 +245,39 @@ async def _arm_profile_auto_close(context: ContextTypes.DEFAULT_TYPE, message, *
         start_auto_close(context, PROFILE_AUTO_CLOSE_KEY, timeout=420)  # 7 minutes
 
 
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job_data = getattr(context.job, "data", {}) if context.job else {}
+    chat_id = job_data.get("chat_id")
+    message_id = job_data.get("message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def _schedule_profile_auto_delete(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    message_id: int,
+    timeout: int = 420,
+) -> None:
+    if not context or not context.application:
+        return
+    from bot.core.database import get_chat_settings
+    settings = await get_chat_settings(chat_id)
+    if settings.get('auto_delete_actions', 0) != 1:
+        return
+    context.job_queue.run_once(
+        delete_message_job,
+        timeout,
+        data={"chat_id": chat_id, "message_id": message_id},
+        name=f"delete_profile_{chat_id}_{message_id}",
+    )
+
+
 def _stats_keyboard(page: int) -> InlineKeyboardMarkup:
     if page == 1:
         return InlineKeyboardMarkup(
@@ -285,10 +318,20 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reply_markup=_profile_keyboard(update.effective_chat and update.effective_chat.type == ChatType.PRIVATE),
         disable_web_page_preview=True,
     )
-    _arm_profile_auto_close(
+    await _arm_profile_auto_close(
         context,
         sent,
         fallback_text="Екран профілю закрито через бездіяльність.",
+    )
+    await _schedule_profile_auto_delete(
+        context,
+        chat_id=sent.chat_id,
+        message_id=sent.message_id,
+    )
+    await _schedule_profile_auto_delete(
+        context,
+        chat_id=msg.chat_id,
+        message_id=msg.message_id,
     )
 
 
@@ -323,7 +366,7 @@ async def profile_stats_open(update: Update, context: ContextTypes.DEFAULT_TYPE)
         disable_web_page_preview=True,
     )
     if query.message:
-        _arm_profile_auto_close(
+        await _arm_profile_auto_close(
             context,
             query.message,
             fallback_text="Екран профілю закрито через бездіяльність.",
@@ -443,7 +486,7 @@ async def profile_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         logger.debug("Не вдалося закрити профіль вручну", exc_info=True)
     if query.message:
-        _arm_profile_auto_close(
+        await _arm_profile_auto_close(
             context,
             query.message,
             fallback_text="Екран профілю закрито через бездіяльність.",
