@@ -78,7 +78,7 @@ def register_system_handlers(application) -> None:
     """Реєстрація системних обробників."""
     application.add_handler(CommandHandler("cancel", cancel_command), group=0)
     # Фолбек на невідомі команди — ВИМКНЕНО. Невідома команда = тиша.
-  application.add_handler(
+    application.add_handler(
         MessageHandler(filters.COMMAND, auto_delete_command_invocation),
         group=99,
     )

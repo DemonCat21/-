@@ -129,25 +129,30 @@ async def handle_action_commands(update: Update, context: ContextTypes.DEFAULT_T
     sender = mention(user)
 
     for action_key, action_response_template in ACTIONS.items():
-        pattern = rf"^\s*{re.escape(action_key)}\b(?:\s.*)?$"
+        pattern = rf"^\s*{re.escape(action_key)}(?:\s.*)?$"
 
         if re.match(pattern, text, re.IGNORECASE):
             action = action_key
             target_user_resolved = None
             target_string_display = None
+            target_user_id = None
+            target_username_mentioned = None
 
             # 1. Визначення цілі (Target)
             if update.message.reply_to_message:
                 target_user_resolved = update.message.reply_to_message.from_user
+                target_user_id = getattr(target_user_resolved, "id", None)
             elif update.message.entities:
                 for entity in update.message.entities:
                     if entity.type == "text_mention" and entity.user:
                         target_user_resolved = entity.user
+                        target_user_id = getattr(target_user_resolved, "id", None)
                         break
                     elif entity.type == "mention":
                         username_from_mention = update.message.text[
                             entity.offset + 1 : entity.offset + entity.length
                         ]
+                        target_username_mentioned = username_from_mention
                         # 1) Спробуємо знайти в локальній БД (швидше та приватніше)
                         try:
                             db_user = await get_user_by_username(username_from_mention)
@@ -156,44 +161,115 @@ async def handle_action_commands(update: Update, context: ContextTypes.DEFAULT_T
 
                         if db_user:
                             # Відомий у БД: відображаємо через ID/ім'я
-                            target_string_display = f"<a href='tg://user?id={db_user['user_id']}'>{html.escape(db_user.get('first_name') or db_user.get('username') or str(db_user['user_id']))}</a>"
+                            target_user_id = db_user.get("user_id")
+                            target_string_display = (
+                                "<a href='tg://user?id={user_id}'>{label}</a>".format(
+                                    user_id=db_user["user_id"],
+                                    label=html.escape(
+                                        db_user.get("first_name")
+                                        or db_user.get("username")
+                                        or str(db_user["user_id"])
+                                    ),
+                                )
+                            )
                         else:
                             # 2) Як запасний варіант — пробуємо отримати через API
-                            potential_user = await get_user_from_username(context, username_from_mention)
+                            potential_user = await get_user_from_username(
+                                context,
+                                username_from_mention,
+                            )
                             if potential_user and not potential_user.is_bot:
                                 target_user_resolved = potential_user
+                                target_user_id = getattr(target_user_resolved, "id", None)
                             else:
                                 try:
-                                    chat_obj = await context.bot.get_chat(f"@{username_from_mention}")
+                                    chat_obj = await context.bot.get_chat(
+                                        f"@{username_from_mention}"
+                                    )
                                     if getattr(chat_obj, "first_name", None):
-                                        target_string_display = f"<a href='tg://user?id={chat_obj.id}'>{html.escape(chat_obj.first_name)}</a>"
+                                        target_user_id = getattr(chat_obj, "id", None)
+                                        target_string_display = (
+                                            "<a href='tg://user?id={user_id}'>{label}</a>".format(
+                                                user_id=chat_obj.id,
+                                                label=html.escape(chat_obj.first_name),
+                                            )
+                                        )
                                     else:
-                                        target_string_display = f"<a href='https://t.me/{html.escape(username_from_mention)}'>@{html.escape(username_from_mention)}</a>"
+                                        target_string_display = (
+                                            "<a href='https://t.me/{username}'>@{username}</a>".format(
+                                                username=html.escape(username_from_mention)
+                                            )
+                                        )
                                 except Exception:
-                                    target_string_display = f"<a href='https://t.me/{html.escape(username_from_mention)}'>@{html.escape(username_from_mention)}</a>"
+                                    target_string_display = (
+                                        "<a href='https://t.me/{username}'>@{username}</a>".format(
+                                            username=html.escape(username_from_mention)
+                                        )
+                                    )
                         break
+
+            if target_user_id is not None and target_user_id == user.id:
+                return
+
+            if (
+                target_username_mentioned
+                and user.username
+                and target_username_mentioned.lower() == user.username.lower()
+            ):
+                return
+
+            if not target_user_resolved and not target_string_display:
+                return
 
             # 2. Форматування відповіді
             if target_user_resolved:
                 # Якщо дія була у відповідь на повідомлення — показуємо клікабельну згадку через ID
                 try:
-                    if update.message.reply_to_message and update.message.reply_to_message.from_user and getattr(target_user_resolved, 'id', None) == update.message.reply_to_message.from_user.id:
+                    if (
+                        update.message.reply_to_message
+                        and update.message.reply_to_message.from_user
+                        and getattr(target_user_resolved, "id", None)
+                        == update.message.reply_to_message.from_user.id
+                    ):
                         # clickable mention for reply targets
                         target_for_response = mention(target_user_resolved)
                     else:
                         # Інакше показуємо plain text ім'я (щоб не було посилань)
-                        target_name = getattr(target_user_resolved, 'first_name', None) or getattr(target_user_resolved, 'username', None) or str(getattr(target_user_resolved, 'id', ''))
+                        target_name = (
+                            getattr(target_user_resolved, "first_name", None)
+                            or getattr(target_user_resolved, "username", None)
+                            or str(getattr(target_user_resolved, "id", ""))
+                        )
                         target_for_response = html.escape(str(target_name))
                 except Exception:
-                    target_for_response = html.escape(str(getattr(target_user_resolved, 'first_name', getattr(target_user_resolved, 'username', getattr(target_user_resolved, 'id', '')))))
-            
-            
+                    target_for_response = html.escape(
+                        str(
+                            getattr(
+                                target_user_resolved,
+                                "first_name",
+                                getattr(
+                                    target_user_resolved,
+                                    "username",
+                                    getattr(target_user_resolved, "id", ""),
+                                ),
+                            )
+                        )
+                    )
+            else:
+                target_for_response = target_string_display or "себе"
+
+            response = action_response_template.format(
+                sender=sender,
+                target=target_for_response,
+            )
+
             # (НОВЕ) Спеціальна обробка для дрочок
             if action == "дроч":
                 # Збільшуємо лічильник дрочок
                 new_count = await increment_jerk_count(user.id)
-                response += f"\nВсього горішків з'їдено: <b>{new_count}</b>👅"
-            
+                response += f"
+Всього горішків з'їдено: <b>{new_count}</b>👅"
+
             photo_path = os.path.join(PHOTO_DIR, f"{action}.jpg")
 
             # 3. Надсилання
@@ -205,42 +281,51 @@ async def handle_action_commands(update: Update, context: ContextTypes.DEFAULT_T
 
                     data = await asyncio.to_thread(_read_bytes, photo_path)
                     sent_message = await update.message.reply_photo(
-                        photo=InputFile(io.BytesIO(data), filename=os.path.basename(photo_path)),
+                        photo=InputFile(
+                            io.BytesIO(data),
+                            filename=os.path.basename(photo_path),
+                        ),
                         caption=response,
                         parse_mode=ParseMode.HTML,
                     )
                 else:
                     sent_message = await update.message.reply_html(response)
-                    
+
                 # Автовидалення через 3 хвилини, якщо ввімкнено
                 settings = await get_chat_settings(update.effective_chat.id)
-                if settings.get('auto_delete_actions', 0) == 1:
+                if settings.get("auto_delete_actions", 0) == 1:
                     # Видаляємо відповідь бота
                     context.job_queue.run_once(
                         delete_message_job,
                         180,  # 3 хвилини
-                        data={"chat_id": sent_message.chat_id, "message_id": sent_message.message_id},
-                        name=f"delete_action_{sent_message.message_id}"
+                        data={
+                            "chat_id": sent_message.chat_id,
+                            "message_id": sent_message.message_id,
+                        },
+                        name=f"delete_action_{sent_message.message_id}",
                     )
                     # Видаляємо виклики команди користувача
                     context.job_queue.run_once(
                         delete_message_job,
                         180,  # 3 хвилини
-                        data={"chat_id": update.effective_chat.id, "message_id": update.message.message_id},
-                        name=f"delete_command_{update.message.message_id}"
+                        data={
+                            "chat_id": update.effective_chat.id,
+                            "message_id": update.message.message_id,
+                        },
+                        name=f"delete_command_{update.message.message_id}",
                     )
-                    
+
             except Exception as e:
                 logger.error(
                     f"Помилка виконання дії '{action}' для {user.id}: {e}",
                     exc_info=True,
                 )
                 # (СТИЛІЗОВАНО)
-                await update.message.reply_text("Ой, мур... 😿 Щось пішло не так. Не можу цього зробити.")
+                await update.message.reply_text(
+                    "Ой, мур... 😿 Щось пішло не так. Не можу цього зробити."
+                )
 
             break # Дія виконана, виходимо
-
-
 # =============================================================================
 # 2. Prediction Handlers (Обробники Передбачень)
 # =============================================================================
